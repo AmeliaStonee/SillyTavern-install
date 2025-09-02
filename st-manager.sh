@@ -1,6 +1,6 @@
-#!/data/data/com/termux/files/usr/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
 
-export PATH="/data/data/com/termux/files/usr/bin:$PATH"
+export PATH="/data/data/com.termux/files/usr/bin:$PATH"
 
 ST_DIR_NAME="SillyTavern"
 ST_DIR="${HOME}/${ST_DIR_NAME}"
@@ -39,18 +39,14 @@ fetch_remote_versions() {
 
     if $needs_fetch; then
         echo -e "${C_YELLOW}正在联网查询最新版本...${C_RESET}"
-        
-        # 获取Release 版本
         local release_api_url="https://api.github.com/repos/SillyTavern/SillyTavern/releases/latest"
         local release_json=$(wget -qO- --timeout=5 "$release_api_url")
         if [ $? -eq 0 ] && [ -n "$release_json" ]; then
             RELEASE_VER=$(echo "$release_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
             [ -z "$RELEASE_VER" ] && RELEASE_VER="解析失败"
         else
-            RELEASE_VER="查询失败"
+            RELEASE_VER="查询失败(速率限制?)"
         fi
-
-        # 获取 Staging 版本
         local staging_url="https://raw.githubusercontent.com/SillyTavern/SillyTavern/staging/package.json"
         local staging_json=$(wget -qO- --timeout=5 "$staging_url")
         if [ $? -eq 0 ] && [ -n "$staging_json" ]; then
@@ -58,17 +54,26 @@ fetch_remote_versions() {
         else
             STAGING_VER="查询失败"
         fi
-
-        # 将结果写入缓存
         echo "RELEASE_VER='${RELEASE_VER}'" > "${CACHE_FILE}"
         echo "STAGING_VER='${STAGING_VER}'" >> "${CACHE_FILE}"
     else
-        # 从缓存加载
         source "${CACHE_FILE}"
-        RELEASE_VER="${RELEASE_VER} (缓存)"
-        STAGING_VER="${STAGING_VER} (缓存)"
     fi
 }
+
+# --- 手动刷新版本号 ---
+force_refresh_versions() {
+    echo -e "${C_CYAN}=== 手动刷新远程版本号 ===${C_RESET}"
+    if [ -f "${CACHE_FILE}" ]; then
+        rm "${CACHE_FILE}"
+        echo -e "${C_GREEN}版本缓存已清除。${C_RESET}"
+    else
+        echo -e "${C_YELLOW}没有找到旧的缓存文件。${C_RESET}"
+    fi
+    echo "下次返回主菜单时将自动联网获取最新版本。"
+    read -p "按回车键返回主菜单..."
+}
+
 
 # --- SillyTavern 核心功能 ---
 install_sillytavern() {
@@ -100,57 +105,4 @@ install_cron_job() { load_backup_config; if [ -z "${BACKUP_TIME}" ]; then return
 manage_backup() { while true; do clear; load_backup_config; echo -e "${C_CYAN}=== 管理备份设置 ===${C_RESET}"; echo -e "1. 修改备份时间\n2. 修改保留天数\n3. 修改备份目录"; read -p "请输入选项 (默认: 0 返回): " choice; choice=${choice:-0}; case $choice in 1) local hour minute; while true; do read -p "输入新小时 (0-23): " hour; if [[ "$hour" =~ ^[0-9]+$ ]] && [ "$hour" -ge 0 ] && [ "$hour" -le 23 ]; then break; else echo -e "${C_RED}无效。${C_RESET}"; fi; done; while true; do read -p "输入新分钟 (0-59): " minute; if [[ "$minute" =~ ^[0-9]+$ ]] && [ "$minute" -ge 0 ] && [ "$minute" -le 59 ]; then break; else echo -e "${C_RED}无效。${C_RESET}"; fi; done; local new_time=$(printf "%02d:%02d" "$hour" "$minute"); sed -i "s|BACKUP_TIME=.*|BACKUP_TIME=\"${new_time}\"|" "${CONFIG_FILE}"; install_cron_job; echo -e "${C_GREEN}时间已更新。${C_RESET}"; sleep 1 ;; 2) read -p "输入新保留天数: " new_days; if [[ "$new_days" =~ ^[0-9]+$ ]]; then sed -i "s|BACKUP_DAYS=.*|BACKUP_DAYS=\"${new_days}\"|" "${CONFIG_FILE}" && echo -e "${C_GREEN}已更新。${C_RESET}"; else echo -e "${C_RED}请输入数字。${C_RESET}"; fi; sleep 1 ;; 3) read -p "输入新备份目录: " new_dir; sed -i "s|BACKUP_DIR=.*|BACKUP_DIR=\"${new_dir}\"|" "${CONFIG_FILE}" && echo -e "${C_GREEN}已更新。${C_RESET}"; sleep 1 ;; 0) break ;; *) echo -e "${C_RED}无效选项。${C_RESET}"; sleep 1 ;; esac; done; }
 manual_backup() { if [ ! -f "${CONFIG_FILE}" ]; then echo -e "${C_YELLOW}请先配置备份 (选项 2)。${C_RESET}"; sleep 2; return; fi; echo -e "${C_YELLOW}正在执行备份...${C_RESET}"; if run_backup; then echo -e "${C_GREEN}手动备份成功！${C_RESET}"; else echo -e "${C_RED}手动备份失败，请检查日志: ${LOG_FILE}${C_RESET}"; fi; read -p "按回车键返回..."; }
 update_self() { echo -e "${C_CYAN}=== 检查管理器脚本更新 ===${C_RESET}"; local temp_file=$(mktemp); if ! wget -q -O "${temp_file}" "${SCRIPT_URL}"; then echo -e "${C_RED}下载失败。${C_RESET}"; rm -f "${temp_file}"; read -p "按回车返回..."; return; fi; if cmp -s "${SCRIPT_PATH}" "${temp_file}"; then echo -e "${C_GREEN}已是最新版本。${C_RESET}"; rm -f "${temp_file}"; else echo -e "${C_GREEN}发现新版本！正在自动更新...${C_RESET}"; mv "${temp_file}" "${SCRIPT_PATH}"; chmod +x "${SCRIPT_PATH}"; echo -e "${C_GREEN}更新成功！脚本将重启...${C_RESET}"; sleep 2; exec bash "${SCRIPT_PATH}"; fi; read -p "按回车键返回..."; }
-setup_script() { echo -e "${C_CYAN}=== SillyTavern 管理器首次设置 ===${C_RESET}"; ensure_dirs; cp "$0" "${SCRIPT_PATH}"; chmod +x "${SCRIPT_PATH}"; local bashrc_file="${HOME}/.bashrc"; local start_command="bash ${SCRIPT_PATH}"; if ! grep -qF "${start_command}" "${bashrc_file}"; then echo -e "\n# 自动启动 SillyTavern 管理器\n${start_command}" >> "${CONFIG_FILE}"; echo -e "${C_GREEN}已设置 Termux 启动时自动运行。${C_RESET}"; fi; echo -e "${C_GREEN}设置完成！正在进入主菜单...${C_RESET}"; sleep 2; exec bash "${SCRIPT_PATH}"; }
-
-# --- 主菜单 ---
-main_menu() {
-    while true; do
-        fetch_remote_versions
-        clear
-        local local_version_info="未安装"
-        local main_option_text="安装 SillyTavern"
-        local is_installed=false
-        if [ -d "${ST_DIR}" ] && [ -f "${ST_DIR}/package.json" ]; then
-            local st_version=$(grep '"version":' "${ST_DIR}/package.json" | sed 's/.*: "\(.*\)".*/\1/')
-            local st_branch=$(cd "${ST_DIR}" && git rev-parse --abbrev-ref HEAD)
-            local_version_info="${st_version} (${st_branch})"
-            main_option_text="启动 SillyTavern"
-            is_installed=true
-        fi
-        echo -e "${C_BLUE}=======================================${C_RESET}"
-        echo -e "${C_CYAN}        SillyTavern 管理器           ${C_RESET}"
-        echo -e "${C_BLUE}=======================================${C_RESET}"
-        printf "${C_YELLOW}%-18s ${C_GREEN}%s\n" "本地版本:" "$local_version_info"
-        printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "远程 Release:" "$RELEASE_VER"
-        printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "远程 Staging:" "$STAGING_VER"
-        echo -e "${C_BLUE}---------------------------------------${C_RESET}"
-        echo -e "  ${C_GREEN}0. ${main_option_text}${C_RESET} (默认)"
-        echo "  1. 更新 SillyTavern"
-        echo ""
-        echo -e "${C_CYAN}--- 数据备份 ---${C_RESET}"
-        if [ -f "${CONFIG_FILE}" ]; then echo "  2. 管理备份设置"; else echo "  2. 安装/配置备份功能"; fi
-        echo "  3. 立即手动备份一次"
-        echo ""
-        echo -e "${C_CYAN}--- 管理器 ---${C_RESET}"
-        echo "  4. 更新管理器脚本"
-        echo "  5. 退出脚本"
-        echo -e "${C_BLUE}---------------------------------------${C_RESET}"
-        read -p "请输入选项 (默认: 0): " choice
-        choice=${choice:-0}
-        case $choice in
-            0) if $is_installed; then start_sillytavern; else install_sillytavern; fi ;;
-            1) if $is_installed; then update_sillytavern; else echo -e "${C_RED}请先安装 (选项0)。${C_RESET}"; sleep 1; fi ;;
-            2) if $is_installed; then if [ -f "${CONFIG_FILE}" ]; then manage_backup; else setup_backup; read -p "按回车返回。"; fi; else echo -e "${C_RED}请先安装 (选项0)。${C_RESET}"; sleep 1; fi ;;
-            3) if $is_installed; then manual_backup; else echo -e "${C_RED}请先安装 (选项0)。${C_RESET}"; sleep 1; fi ;;
-            4) update_self ;;
-            5) echo "退出脚本。"; exit 0 ;;
-            *) echo -e "${C_RED}无效选项。${C_RESET}"; sleep 1 ;;
-        esac
-    done
-}
-
-# --- 脚本入口 ---
-case "$1" in
-    --run-backup) ensure_dirs; run_backup ;;
-    *) if [ "$(realpath "$0")" != "${SCRIPT_PATH}" ]; then setup_script; else main_menu; fi ;;
-esac
+setup_script() { echo -e "${C_CYAN}=== SillyTavern 管理器首次设置 ===${C_RESET}"; ensure_dirs; cp "$0" "${SCRIPT_PATH}"; chmod +x "${SCRIPT_PATH}"; local bashrc_file="${HOME}/.bashrc"; local start_command="bash ${SCRIPT_PATH}"; if ! grep -qF "${start_command}" "${bashrc_file}"; then echo -e "\n# 自动启动 SillyTavern 管理器\n${start_command}" >> "${bashrc_
