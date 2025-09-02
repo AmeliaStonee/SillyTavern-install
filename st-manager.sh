@@ -1,4 +1,6 @@
-#!/data/data/com/termux/files/usr/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
+
+export PATH="/data/data/com.termux/files/usr/bin:$PATH"
 
 ST_DIR_NAME="SillyTavern"
 ST_DIR="${HOME}/${ST_DIR_NAME}"
@@ -145,7 +147,6 @@ setup_backup() {
     read -p "您想保留最近多少天的备份？ (默认: 7): " backup_days
     BACKUP_DAYS=${backup_days:-7}
     
-    # 改进的时间输入
     local hour minute
     while true; do
         read -p "设置每天自动备份的小时 (0-23): " hour
@@ -192,7 +193,7 @@ manage_backup() {
                 while true; do read -p "输入新的分钟 (0-59): " minute; if [[ "$minute" =~ ^[0-9]+$ ]] && [ "$minute" -ge 0 ] && [ "$minute" -le 59 ]; then break; else echo -e "${C_RED}无效输入。${C_RESET}"; fi; done
                 local new_time=$(printf "%02d:%02d" "$hour" "$minute")
                 sed -i "s|BACKUP_TIME=.*|BACKUP_TIME=\"${new_time}\"|" "${CONFIG_FILE}"
-                install_cron_job # <- 关键修复：重新应用定时任务
+                install_cron_job
                 echo -e "${C_GREEN}时间已更新并应用。${C_RESET}"; sleep 1 ;;
             2)
                 read -p "输入新的保留天数: " new_days
