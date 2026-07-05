@@ -2,6 +2,7 @@
 
 export PATH="/data/data/com/termux/files/usr/bin:$PATH"
 
+MANAGER_VERSION="1.0"
 ST_DIR_NAME="SillyTavern"
 ST_DIR="${HOME}/${ST_DIR_NAME}"
 ST_DATA_USER_SUBPATH="data/default-user"
@@ -129,6 +130,11 @@ start_sillytavern() {
              echo -e "${C_GREEN}备份服务正常运行中。${C_RESET}"
         fi
     fi
+    if clewdr_is_installed; then
+        read -p "$(echo -e "${C_YELLOW}检测到已安装 ClewdR，是否先在后台启动 ClewdR？[Y/n]: ${C_RESET}")" st_clewdr
+        st_clewdr=${st_clewdr:-Y}
+        if [[ "$st_clewdr" =~ ^[Yy]$ ]]; then start_clewdr_background; sleep 1; fi
+    fi
     cd "${ST_DIR}" || { echo -e "${C_RED}错误: 无法进入目录 ${ST_DIR}${C_RESET}"; exit 1; }
     bash start.sh
 }
@@ -212,7 +218,7 @@ install_clewdr() {
     chmod +x "${CLEWDR_BIN}" 2>/dev/null
     if clewdr_is_installed; then
         echo -e "${C_GREEN}ClewdR 已就绪：${CLEWDR_BIN}${C_RESET}"
-        echo -e "${C_YELLOW}提示：可先用菜单“配置 ClewdR 变量”设置端口等，再启动。凭证(Cookie)非必填，可后续在网页面板添加。${C_RESET}"
+        echo -e "${C_YELLOW}提示：首次启动前需设置管理面板密码与 API 密码（必填），启动时会提示。凭证(Cookie)非必填，可后续在网页面板添加。${C_RESET}"
     else
         echo -e "${C_RED}安装异常：未找到可执行文件。${C_RESET}"
     fi
@@ -221,7 +227,7 @@ install_clewdr() {
 
 configure_clewdr() {
     echo -e "${C_CYAN}=== 配置 ClewdR 变量 ===${C_RESET}"
-    echo -e "${C_YELLOW}以下均为可选项，直接回车表示保持默认/留空（留空的密码将由 ClewdR 首次启动时自动生成）。${C_RESET}"
+    echo -e "${C_YELLOW}其中 管理面板密码 与 API 密码 为必填；IP / 端口 / 代理 可回车保持默认或留空。${C_RESET}"
     mkdir -p "${CLEWDR_DIR}"
 
     # 监听地址
@@ -240,13 +246,25 @@ configure_clewdr() {
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then set_toml_kv "port" "$port"; break; else echo -e "${C_RED}端口无效。${C_RESET}"; fi
     done
 
-    # 管理面板密码（可选）
-    read -p "管理面板密码 admin_password (可选, 回车跳过): " admin_pw
-    [ -n "$admin_pw" ] && set_toml_kv "admin_password" "\"${admin_pw}\""
+    # 管理面板密码（必填）
+    local cur_admin; cur_admin=$(get_toml_value "admin_password")
+    local admin_pw=""
+    while [ -z "$admin_pw" ]; do
+        read -p "管理面板密码 admin_password (必填${cur_admin:+, 回车沿用当前}): " admin_pw
+        [ -z "$admin_pw" ] && [ -n "$cur_admin" ] && admin_pw="$cur_admin"
+        [ -z "$admin_pw" ] && echo -e "${C_RED}不能为空。${C_RESET}"
+    done
+    set_toml_kv "admin_password" "\"${admin_pw}\""
 
-    # API 访问密码（可选）
-    read -p "API 访问密码 password (客户端连接用, 可选, 回车跳过): " api_pw
-    [ -n "$api_pw" ] && set_toml_kv "password" "\"${api_pw}\""
+    # API 访问密码（必填）
+    local cur_api; cur_api=$(get_toml_value "password")
+    local api_pw=""
+    while [ -z "$api_pw" ]; do
+        read -p "API 访问密码 password (客户端连接用, 必填${cur_api:+, 回车沿用当前}): " api_pw
+        [ -z "$api_pw" ] && [ -n "$cur_api" ] && api_pw="$cur_api"
+        [ -z "$api_pw" ] && echo -e "${C_RED}不能为空。${C_RESET}"
+    done
+    set_toml_kv "password" "\"${api_pw}\""
 
     # 出站代理（可选）
     read -p "出站代理 proxy (如 http://127.0.0.1:7890, 可选, 回车跳过): " proxy
@@ -256,14 +274,55 @@ configure_clewdr() {
     read -p "按回车返回..."
 }
 
+# 确保管理面板密码与 API 密码已设置（二者必填），未设置则现场要求填写
+ensure_clewdr_credentials() {
+    local admin_pw api_pw
+    admin_pw=$(get_toml_value "admin_password")
+    api_pw=$(get_toml_value "password")
+    [ -n "$admin_pw" ] && [ -n "$api_pw" ] && return 0
+    echo -e "${C_YELLOW}启动前需先设置 ClewdR 的管理面板密码与 API 密码（均为必填）。${C_RESET}"
+    while [ -z "$admin_pw" ]; do read -p "设置管理面板密码 admin_password: " admin_pw; [ -z "$admin_pw" ] && echo -e "${C_RED}不能为空。${C_RESET}"; done
+    set_toml_kv "admin_password" "\"${admin_pw}\""
+    while [ -z "$api_pw" ]; do read -p "设置 API 访问密码 password: " api_pw; [ -z "$api_pw" ] && echo -e "${C_RED}不能为空。${C_RESET}"; done
+    set_toml_kv "password" "\"${api_pw}\""
+    echo -e "${C_GREEN}密码已保存到 ${CLEWDR_CONFIG}${C_RESET}"
+}
+
+# 在终端醒目地打印 WebUI 管理地址
+print_clewdr_webui() {
+    local port; port=$(get_toml_value "port"); port=${port:-8484}
+    echo -e "${C_GREEN}================================================${C_RESET}"
+    echo -e "${C_GREEN}  ClewdR WebUI 管理地址: http://127.0.0.1:${port}${C_RESET}"
+    echo -e "${C_GREEN}================================================${C_RESET}"
+}
+
+# 后台启动 ClewdR（供“启动 SillyTavern 前先启动 ClewdR”使用，不阻塞终端）
+start_clewdr_background() {
+    clewdr_is_installed || { echo -e "${C_RED}尚未安装 ClewdR。${C_RESET}"; return 1; }
+    ensure_clewdr_credentials
+    if pgrep -x clewdr >/dev/null 2>&1; then
+        echo -e "${C_GREEN}ClewdR 已在后台运行。${C_RESET}"
+    else
+        cd "${CLEWDR_DIR}" || { echo -e "${C_RED}无法进入目录 ${CLEWDR_DIR}${C_RESET}"; return 1; }
+        LD_LIBRARY_PATH="${CLEWDR_DIR}:${LD_LIBRARY_PATH}" nohup ./clewdr > "${CLEWDR_DIR}/clewdr.log" 2>&1 &
+        sleep 1
+        if pgrep -x clewdr >/dev/null 2>&1; then
+            echo -e "${C_GREEN}ClewdR 已在后台启动（日志: ${CLEWDR_DIR}/clewdr.log）。${C_RESET}"
+        else
+            echo -e "${C_RED}ClewdR 后台启动失败，请查看日志: ${CLEWDR_DIR}/clewdr.log${C_RESET}"; return 1
+        fi
+    fi
+    print_clewdr_webui
+}
+
 start_clewdr() {
     echo -e "${C_CYAN}=== 启动 ClewdR ===${C_RESET}"
     if ! clewdr_is_installed; then
         echo -e "${C_RED}尚未安装 ClewdR，请先使用菜单“安装/更新 ClewdR”。${C_RESET}"; sleep 2; return
     fi
-    local port; port=$(get_toml_value "port"); port=${port:-8484}
-    echo -e "${C_GREEN}网页管理面板: http://127.0.0.1:${port}${C_RESET}"
-    echo -e "${C_YELLOW}首次启动会自动生成 clewdr.toml 并在下方打印管理密码，请留意。按 Ctrl+C 可停止。${C_RESET}"
+    ensure_clewdr_credentials
+    print_clewdr_webui
+    echo -e "${C_YELLOW}下方为 ClewdR 运行日志，按 Ctrl+C 可停止并返回。${C_RESET}"
     cd "${CLEWDR_DIR}" || { echo -e "${C_RED}无法进入目录 ${CLEWDR_DIR}${C_RESET}"; return; }
     # Android 版依赖同目录下的 libc++_shared.so，需通过 LD_LIBRARY_PATH 让动态链接器找到它
     LD_LIBRARY_PATH="${CLEWDR_DIR}:${LD_LIBRARY_PATH}" ./clewdr
@@ -323,7 +382,7 @@ main_menu() {
             is_installed=true
         fi
         echo -e "${C_BLUE}=======================================${C_RESET}"
-        echo -e "${C_CYAN}        SillyTavern 管理器           ${C_RESET}"
+        echo -e "${C_CYAN}      SillyTavern 管理器  v${MANAGER_VERSION}      ${C_RESET}"
         echo -e "${C_BLUE}=======================================${C_RESET}"
         local clewdr_status="未安装"
         if clewdr_is_installed; then clewdr_status="已安装"; fi
