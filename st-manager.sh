@@ -12,6 +12,12 @@ LOG_FILE="${SCRIPT_INSTALL_DIR}/backup.log"
 CACHE_FILE="${SCRIPT_INSTALL_DIR}/versions.cache"
 CACHE_DURATION=3600
 
+# --- ClewdR 代理 ---
+CLEWDR_REPO="Xerxes-2/clewdr"
+CLEWDR_DIR="${HOME}/clewdr"
+CLEWDR_BIN="${CLEWDR_DIR}/clewdr"
+CLEWDR_CONFIG="${CLEWDR_DIR}/clewdr.toml"
+
 SCRIPT_URL="https://raw.githubusercontent.com/AmeliaStonee/SillyTavern-install/main/st-manager.sh"
 
 C_RESET='\033[0m'
@@ -23,6 +29,30 @@ C_CYAN='\033[0;36m'
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
 ensure_dirs() { mkdir -p "${SCRIPT_INSTALL_DIR}"; }
+
+# --- 网络下载封装：优先 curl，回退 wget ---
+# Termux 默认可能只装了其中一个（甚至都没装）。脚本原先只用 wget，
+# 一旦缺失就会 "wget: command not found"，导致版本检测与自更新全部失败。
+http_get() {  # 下载到标准输出
+    local url="$1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 8 "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- --timeout=8 "$url"
+    else
+        return 127
+    fi
+}
+http_download() {  # 下载到文件：http_download <url> <输出路径>
+    local url="$1" out="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 20 -o "$out" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$out" "$url"
+    else
+        return 127
+    fi
+}
 
 # --- 从 package.json 文本中解析 version 字段 ---
 # SillyTavern 前端展示的版本号就是 package.json 里的 "version"，
@@ -52,7 +82,7 @@ fetch_remote_versions() {
         echo -e "${C_YELLOW}正在联网查询最新版本...${C_RESET}"
         # Release 版本：读取 release 分支（SillyTavern 的稳定分支，即默认分支）的 package.json
         local release_url="https://raw.githubusercontent.com/SillyTavern/SillyTavern/release/package.json"
-        local release_json=$(wget -qO- --timeout=5 "$release_url")
+        local release_json=$(http_get "$release_url")
         if [ $? -eq 0 ] && [ -n "$release_json" ]; then
             RELEASE_VER=$(parse_pkg_version "$release_json")
             [ -z "$RELEASE_VER" ] && RELEASE_VER="解析失败"
@@ -61,7 +91,7 @@ fetch_remote_versions() {
         fi
         # Staging 版本：读取 staging 分支（开发分支）的 package.json
         local staging_url="https://raw.githubusercontent.com/SillyTavern/SillyTavern/staging/package.json"
-        local staging_json=$(wget -qO- --timeout=5 "$staging_url")
+        local staging_json=$(http_get "$staging_url")
         if [ $? -eq 0 ] && [ -n "$staging_json" ]; then
             STAGING_VER=$(parse_pkg_version "$staging_json")
             [ -z "$STAGING_VER" ] && STAGING_VER="解析失败"
@@ -75,18 +105,11 @@ fetch_remote_versions() {
     fi
 }
 
-force_refresh_versions() {
-    echo -e "${C_CYAN}=== 手动刷新远程版本号 ===${C_RESET}"
-    if [ -f "${CACHE_FILE}" ]; then rm "${CACHE_FILE}"; echo -e "${C_GREEN}版本缓存已清除。${C_RESET}"; else echo -e "${C_YELLOW}没有找到旧的缓存文件。${C_RESET}"; fi
-    echo "下次返回主菜单时将自动联网获取最新版本。"
-    read -p "按回车键返回主菜单..."
-}
-
 # --- SillyTavern核心功能 ---
 install_sillytavern() {
     echo -e "${C_CYAN}=== 开始安装 SillyTavern ===${C_RESET}"
     pkg update -y && pkg upgrade -y
-    pkg install git nodejs esbuild cronie zip unzip -y
+    pkg install git nodejs esbuild cronie zip unzip curl wget -y
     read -p "您想安装哪个分支？[1] release (稳定版, 默认) [2] staging (开发版): " choice
     choice=${choice:-1}
     if [[ "$choice" == "1" ]]; then git clone https://github.com/SillyTavern/SillyTavern "${ST_DIR}"; else git clone -b staging https://github.com/SillyTavern/SillyTavern "${ST_DIR}"; fi
@@ -136,10 +159,121 @@ install_cron_job() { load_backup_config; if [ -z "${BACKUP_TIME}" ]; then return
 manage_backup() { while true; do clear; load_backup_config; echo -e "${C_CYAN}=== 管理备份设置 ===${C_RESET}"; echo -e "1. 修改备份时间\n2. 修改保留天数\n3. 修改备份目录"; read -p "请输入选项 (默认: 0 返回): " choice; choice=${choice:-0}; case $choice in 1) local hour minute; while true; do read -p "输入新小时 (0-23): " hour; if [[ "$hour" =~ ^[0-9]+$ ]] && [ "$hour" -ge 0 ] && [ "$hour" -le 23 ]; then break; else echo -e "${C_RED}无效。${C_RESET}"; fi; done; while true; do read -p "输入新分钟 (0-59): " minute; if [[ "$minute" =~ ^[0-9]+$ ]] && [ "$minute" -ge 0 ] && [ "$minute" -le 59 ]; then break; else echo -e "${C_RED}无效。${C_RESET}"; fi; done; local new_time=$(printf "%02d:%02d" "$hour" "$minute"); sed -i "s|BACKUP_TIME=.*|BACKUP_TIME=\"${new_time}\"|" "${CONFIG_FILE}"; install_cron_job; echo -e "${C_GREEN}时间已更新。${C_RESET}"; sleep 1 ;; 2) read -p "输入新保留天数: " new_days; if [[ "$new_days" =~ ^[0-9]+$ ]]; then sed -i "s|BACKUP_DAYS=.*|BACKUP_DAYS=\"${new_days}\"|" "${CONFIG_FILE}" && echo -e "${C_GREEN}已更新。${C_RESET}"; else echo -e "${C_RED}请输入数字。${C_RESET}"; fi; sleep 1 ;; 3) read -p "输入新备份目录: " new_dir; sed -i "s|BACKUP_DIR=.*|BACKUP_DIR=\"${new_dir}\"|" "${CONFIG_FILE}" && echo -e "${C_GREEN}已更新。${C_RESET}"; sleep 1 ;; 0) break ;; *) echo -e "${C_RED}无效选项。${C_RESET}"; sleep 1 ;; esac; done; }
 manual_backup() { if [ ! -f "${CONFIG_FILE}" ]; then echo -e "${C_YELLOW}请先配置备份 (选项 2)。${C_RESET}"; sleep 2; return; fi; echo -e "${C_YELLOW}正在执行备份...${C_RESET}"; if run_backup; then echo -e "${C_GREEN}手动备份成功！${C_RESET}"; else echo -e "${C_RED}手动备份失败，请检查日志: ${LOG_FILE}${C_RESET}"; fi; read -p "按回车键返回..."; }
 
+# --- ClewdR 代理功能 ---
+# 检测 CPU 架构，映射到 clewdr 的发布产物命名（clewdr-android-<arch>.zip）
+detect_clewdr_arch() {
+    case "$(uname -m)" in
+        aarch64|arm64) echo "aarch64" ;;
+        x86_64|amd64)  echo "x86_64" ;;
+        *) echo "" ;;
+    esac
+}
+
+clewdr_is_installed() { [ -x "${CLEWDR_BIN}" ]; }
+
+# 读取 clewdr.toml 中某个键的值（去掉引号），用于展示监听端口等
+get_toml_value() {
+    local key="$1"
+    [ -f "${CLEWDR_CONFIG}" ] || return 1
+    grep -E "^\s*${key}\s*=" "${CLEWDR_CONFIG}" | head -n1 | sed -E "s/^[^=]*=\s*//; s/^\"//; s/\"\s*$//"
+}
+
+# 在 clewdr.toml 中设置键值：存在则替换，不存在则追加。value 需自带引号（字符串）或为裸数字。
+set_toml_kv() {
+    local key="$1" value="$2"
+    mkdir -p "${CLEWDR_DIR}"; touch "${CLEWDR_CONFIG}"
+    if grep -qE "^\s*${key}\s*=" "${CLEWDR_CONFIG}"; then
+        sed -i "s|^\s*${key}\s*=.*|${key} = ${value}|" "${CLEWDR_CONFIG}"
+    else
+        echo "${key} = ${value}" >> "${CLEWDR_CONFIG}"
+    fi
+}
+
+install_clewdr() {
+    echo -e "${C_CYAN}=== 安装 / 更新 ClewdR ===${C_RESET}"
+    if ! command -v unzip >/dev/null 2>&1; then pkg install unzip -y; fi
+    local arch; arch=$(detect_clewdr_arch)
+    if [ -z "$arch" ]; then
+        echo -e "${C_RED}不支持的 CPU 架构: $(uname -m)。ClewdR 仅提供 aarch64 / x86_64 版本。${C_RESET}"
+        read -p "按回车返回..."; return
+    fi
+    local asset="clewdr-android-${arch}.zip"
+    local url="https://github.com/${CLEWDR_REPO}/releases/latest/download/${asset}"
+    mkdir -p "${CLEWDR_DIR}"
+    local tmpzip; tmpzip=$(mktemp)
+    echo -e "${C_YELLOW}正在下载 ${asset} ...${C_RESET}"
+    if ! http_download "$url" "$tmpzip"; then
+        echo -e "${C_RED}下载失败，请检查网络（GitHub 连接）。${C_RESET}"; rm -f "$tmpzip"; read -p "按回车返回..."; return
+    fi
+    if ! unzip -o "$tmpzip" -d "${CLEWDR_DIR}" >/dev/null; then
+        echo -e "${C_RED}解压失败，下载的文件可能不完整。${C_RESET}"; rm -f "$tmpzip"; read -p "按回车返回..."; return
+    fi
+    rm -f "$tmpzip"
+    chmod +x "${CLEWDR_BIN}" 2>/dev/null
+    if clewdr_is_installed; then
+        echo -e "${C_GREEN}ClewdR 已就绪：${CLEWDR_BIN}${C_RESET}"
+        echo -e "${C_YELLOW}提示：可先用菜单“配置 ClewdR 变量”设置端口等，再启动。凭证(Cookie)非必填，可后续在网页面板添加。${C_RESET}"
+    else
+        echo -e "${C_RED}安装异常：未找到可执行文件。${C_RESET}"
+    fi
+    read -p "按回车返回..."
+}
+
+configure_clewdr() {
+    echo -e "${C_CYAN}=== 配置 ClewdR 变量 ===${C_RESET}"
+    echo -e "${C_YELLOW}以下均为可选项，直接回车表示保持默认/留空（留空的密码将由 ClewdR 首次启动时自动生成）。${C_RESET}"
+    mkdir -p "${CLEWDR_DIR}"
+
+    # 监听地址
+    echo -e "监听地址: [1] 仅本机 127.0.0.1 (默认)  [2] 局域网 0.0.0.0 (同网络其它设备可访问)"
+    read -p "请选择 (默认 1): " ip_choice
+    case "${ip_choice:-1}" in
+        2) set_toml_kv "ip" "\"0.0.0.0\"";;
+        *) set_toml_kv "ip" "\"127.0.0.1\"";;
+    esac
+
+    # 端口
+    local cur_port; cur_port=$(get_toml_value "port"); cur_port=${cur_port:-8484}
+    while true; do
+        read -p "监听端口 (默认 ${cur_port}): " port
+        port=${port:-$cur_port}
+        if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then set_toml_kv "port" "$port"; break; else echo -e "${C_RED}端口无效。${C_RESET}"; fi
+    done
+
+    # 管理面板密码（可选）
+    read -p "管理面板密码 admin_password (可选, 回车跳过): " admin_pw
+    [ -n "$admin_pw" ] && set_toml_kv "admin_password" "\"${admin_pw}\""
+
+    # API 访问密码（可选）
+    read -p "API 访问密码 password (客户端连接用, 可选, 回车跳过): " api_pw
+    [ -n "$api_pw" ] && set_toml_kv "password" "\"${api_pw}\""
+
+    # 出站代理（可选）
+    read -p "出站代理 proxy (如 http://127.0.0.1:7890, 可选, 回车跳过): " proxy
+    [ -n "$proxy" ] && set_toml_kv "proxy" "\"${proxy}\""
+
+    echo -e "${C_GREEN}配置已写入 ${CLEWDR_CONFIG}${C_RESET}"
+    read -p "按回车返回..."
+}
+
+start_clewdr() {
+    echo -e "${C_CYAN}=== 启动 ClewdR ===${C_RESET}"
+    if ! clewdr_is_installed; then
+        echo -e "${C_RED}尚未安装 ClewdR，请先使用菜单“安装/更新 ClewdR”。${C_RESET}"; sleep 2; return
+    fi
+    local port; port=$(get_toml_value "port"); port=${port:-8484}
+    echo -e "${C_GREEN}网页管理面板: http://127.0.0.1:${port}${C_RESET}"
+    echo -e "${C_YELLOW}首次启动会自动生成 clewdr.toml 并在下方打印管理密码，请留意。按 Ctrl+C 可停止。${C_RESET}"
+    cd "${CLEWDR_DIR}" || { echo -e "${C_RED}无法进入目录 ${CLEWDR_DIR}${C_RESET}"; return; }
+    # Android 版依赖同目录下的 libc++_shared.so，需通过 LD_LIBRARY_PATH 让动态链接器找到它
+    LD_LIBRARY_PATH="${CLEWDR_DIR}:${LD_LIBRARY_PATH}" ./clewdr
+    read -p "ClewdR 已退出，按回车返回..."
+}
+
 # --- 脚本更新---
 update_self() {
     echo -e "${C_CYAN}=== 检查管理器脚本更新 ===${C_RESET}"; local temp_file=$(mktemp)
-    if ! wget -q -O "${temp_file}" "${SCRIPT_URL}"; then
+    if ! http_download "${SCRIPT_URL}" "${temp_file}"; then
         echo -e "${C_RED}下载失败。${C_RESET}"; rm -f "${temp_file}"; read -p "按回车返回..."; return
     fi
     if cmp -s "${SCRIPT_PATH}" "${temp_file}"; then
@@ -191,9 +325,12 @@ main_menu() {
         echo -e "${C_BLUE}=======================================${C_RESET}"
         echo -e "${C_CYAN}        SillyTavern 管理器           ${C_RESET}"
         echo -e "${C_BLUE}=======================================${C_RESET}"
+        local clewdr_status="未安装"
+        if clewdr_is_installed; then clewdr_status="已安装"; fi
         printf "${C_YELLOW}%-18s ${C_GREEN}%s\n" "本地版本:" "$local_version_info"
         printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "远程 Release:" "$RELEASE_VER"
         printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "远程 Staging:" "$STAGING_VER"
+        printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "ClewdR:" "$clewdr_status"
         echo -e "${C_BLUE}---------------------------------------${C_RESET}"
         echo -e "  ${C_GREEN}0. ${main_option_text}${C_RESET} (默认)"
         echo "  1. 更新 SillyTavern"
@@ -202,10 +339,14 @@ main_menu() {
         if [ -f "${CONFIG_FILE}" ]; then echo "  2. 管理备份设置"; else echo "  2. 安装/配置备份功能"; fi
         echo "  3. 立即手动备份一次"
         echo ""
+        echo -e "${C_CYAN}--- ClewdR 代理 ---${C_RESET}"
+        if clewdr_is_installed; then echo "  5. 更新 ClewdR"; else echo "  5. 安装 ClewdR"; fi
+        echo "  6. 启动 ClewdR"
+        echo "  7. 配置 ClewdR 变量"
+        echo ""
         echo -e "${C_CYAN}--- 管理器 ---${C_RESET}"
         echo "  4. 更新管理器脚本"
-        echo "  5. 手动刷新远程版本号"
-        echo "  6. 退出脚本"
+        echo "  8. 退出脚本"
         echo -e "${C_BLUE}---------------------------------------${C_RESET}"
         read -p "请输入选项 (默认: 0): " choice; choice=${choice:-0}
         case $choice in
@@ -214,8 +355,10 @@ main_menu() {
             2) if $is_installed; then if [ -f "${CONFIG_FILE}" ]; then manage_backup; else setup_backup; read -p "按回车返回。"; fi; else echo -e "${C_RED}请先安装 (选项0)。${C_RESET}"; sleep 1; fi ;;
             3) if $is_installed; then manual_backup; else echo -e "${C_RED}请先安装 (选项0)。${C_RESET}"; sleep 1; fi ;;
             4) update_self ;;
-            5) force_refresh_versions ;;
-            6) echo "退出脚本。"; exit 0 ;;
+            5) install_clewdr ;;
+            6) start_clewdr ;;
+            7) configure_clewdr ;;
+            8) echo "退出脚本。"; exit 0 ;;
             *) echo -e "${C_RED}无效选项。${C_RESET}"; sleep 1 ;;
         esac
     done
