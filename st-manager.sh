@@ -24,7 +24,18 @@ C_CYAN='\033[0;36m'
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
 ensure_dirs() { mkdir -p "${SCRIPT_INSTALL_DIR}"; }
 
+# --- 从 package.json 文本中解析 version 字段 ---
+# SillyTavern 前端展示的版本号就是 package.json 里的 "version"，
+# 本地版本检测也读取同一字段，因此用它来对比最为一致。
+parse_pkg_version() {
+    echo "$1" | grep '"version":' | head -n1 | sed 's/.*: *"\([^"]*\)".*/\1/'
+}
+
 # --- 使用缓存获取版本 ---
+# 说明：release / staging 版本均直接读取对应分支的 package.json（raw 源）。
+# 早期版本用 api.github.com 的 releases/latest 获取 release 版本，但未认证的
+# GitHub API 每小时仅限 60 次请求，Termux 手机网络共享运营商出口 IP，极易触发
+# 速率限制导致“查询失败(速率限制?)”。raw.githubusercontent.com 无此限制，更可靠。
 fetch_remote_versions() {
     local needs_fetch=false
     if [ ! -f "${CACHE_FILE}" ]; then
@@ -39,18 +50,21 @@ fetch_remote_versions() {
 
     if $needs_fetch; then
         echo -e "${C_YELLOW}正在联网查询最新版本...${C_RESET}"
-        local release_api_url="https://api.github.com/repos/SillyTavern/SillyTavern/releases/latest"
-        local release_json=$(wget -qO- --timeout=5 "$release_api_url")
+        # Release 版本：读取 release 分支（SillyTavern 的稳定分支，即默认分支）的 package.json
+        local release_url="https://raw.githubusercontent.com/SillyTavern/SillyTavern/release/package.json"
+        local release_json=$(wget -qO- --timeout=5 "$release_url")
         if [ $? -eq 0 ] && [ -n "$release_json" ]; then
-            RELEASE_VER=$(echo "$release_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+            RELEASE_VER=$(parse_pkg_version "$release_json")
             [ -z "$RELEASE_VER" ] && RELEASE_VER="解析失败"
         else
-            RELEASE_VER="查询失败(速率限制?)"
+            RELEASE_VER="查询失败"
         fi
+        # Staging 版本：读取 staging 分支（开发分支）的 package.json
         local staging_url="https://raw.githubusercontent.com/SillyTavern/SillyTavern/staging/package.json"
         local staging_json=$(wget -qO- --timeout=5 "$staging_url")
         if [ $? -eq 0 ] && [ -n "$staging_json" ]; then
-            STAGING_VER=$(echo "$staging_json" | grep '"version":' | sed 's/.*: "\(.*\)".*/\1/')
+            STAGING_VER=$(parse_pkg_version "$staging_json")
+            [ -z "$STAGING_VER" ] && STAGING_VER="解析失败"
         else
             STAGING_VER="查询失败"
         fi
@@ -104,7 +118,7 @@ update_sillytavern() {
         1) git pull && npm install && echo -e "${C_GREEN}更新完成！${C_RESET}";;
         2) echo "切换到: [1] release [2] staging"; read -p "请输入选项: " s_choice
            case $s_choice in
-               1) git switch main && git pull && npm install && echo -e "${C_GREEN}已切换到 release。${C_RESET}";;
+               1) git switch release && git pull && npm install && echo -e "${C_GREEN}已切换到 release。${C_RESET}";;
                2) git switch staging && git pull && npm install && echo -e "${C_GREEN}已切换到 staging。${C_RESET}";;
                *) echo -e "${C_RED}无效。${C_RESET}";;
            esac;;
@@ -168,7 +182,7 @@ main_menu() {
         local main_option_text="安装 SillyTavern"
         local is_installed=false
         if [ -d "${ST_DIR}" ] && [ -f "${ST_DIR}/package.json" ]; then
-            local st_version=$(grep '"version":' "${ST_DIR}/package.json" | sed 's/.*: "\(.*\)".*/\1/')
+            local st_version=$(parse_pkg_version "$(cat "${ST_DIR}/package.json")")
             local st_branch=$(cd "${ST_DIR}" && git rev-parse --abbrev-ref HEAD)
             local_version_info="${st_version} (${st_branch})"
             main_option_text="启动 SillyTavern"
