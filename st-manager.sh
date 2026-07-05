@@ -18,6 +18,7 @@ CLEWDR_REPO="Xerxes-2/clewdr"
 CLEWDR_DIR="${HOME}/clewdr"
 CLEWDR_BIN="${CLEWDR_DIR}/clewdr"
 CLEWDR_CONFIG="${CLEWDR_DIR}/clewdr.toml"
+CLEWDR_MANAGER_CONF="${SCRIPT_INSTALL_DIR}/clewdr.conf"
 
 SCRIPT_URL="https://raw.githubusercontent.com/AmeliaStonee/SillyTavern-install/main/st-manager.sh"
 
@@ -130,10 +131,9 @@ start_sillytavern() {
              echo -e "${C_GREEN}备份服务正常运行中。${C_RESET}"
         fi
     fi
-    if clewdr_is_installed; then
-        read -p "$(echo -e "${C_YELLOW}检测到已安装 ClewdR，是否先在后台启动 ClewdR？[Y/n]: ${C_RESET}")" st_clewdr
-        st_clewdr=${st_clewdr:-Y}
-        if [[ "$st_clewdr" =~ ^[Yy]$ ]]; then start_clewdr_background; sleep 1; fi
+    if clewdr_is_installed && [ "$(get_clewdr_autostart)" = "true" ]; then
+        echo -e "${C_YELLOW}ClewdR 自启动已开启，正在后台启动...${C_RESET}"
+        start_clewdr_background; sleep 1
     fi
     cd "${ST_DIR}" || { echo -e "${C_RED}错误: 无法进入目录 ${ST_DIR}${C_RESET}"; exit 1; }
     bash start.sh
@@ -225,23 +225,49 @@ install_clewdr() {
     read -p "按回车返回..."
 }
 
-configure_clewdr() {
+# 读取 ClewdR 自启动开关（随 SillyTavern 启动时是否后台拉起 ClewdR），默认 false
+get_clewdr_autostart() {
+    if [ -f "${CLEWDR_MANAGER_CONF}" ]; then source "${CLEWDR_MANAGER_CONF}"; fi
+    echo "${CLEWDR_AUTOSTART:-false}"
+}
+
+# 显示 clewdr.toml 中当前正在使用的变量值
+show_clewdr_current_vars() {
+    local ip port admin api proxy
+    ip=$(get_toml_value "ip");             ip=${ip:-127.0.0.1 (默认)}
+    port=$(get_toml_value "port");         port=${port:-8484 (默认)}
+    admin=$(get_toml_value "admin_password"); admin=${admin:-(未设置)}
+    api=$(get_toml_value "password");      api=${api:-(未设置)}
+    proxy=$(get_toml_value "proxy");       proxy=${proxy:-(未设置)}
+    echo -e "${C_CYAN}--- 当前变量 (${CLEWDR_CONFIG}) ---${C_RESET}"
+    printf "${C_YELLOW}%-22s${C_GREEN}%s\n" "监听地址 ip:" "$ip"
+    printf "${C_YELLOW}%-22s${C_GREEN}%s\n" "监听端口 port:" "$port"
+    printf "${C_YELLOW}%-22s${C_GREEN}%s\n" "管理面板密码 admin:" "$admin"
+    printf "${C_YELLOW}%-22s${C_GREEN}%s\n" "API 密码 password:" "$api"
+    printf "${C_YELLOW}%-22s${C_GREEN}%s\n" "出站代理 proxy:" "$proxy"
+    echo -e "${C_CYAN}--------------------------------${C_RESET}"
+}
+
+configure_clewdr_vars() {
     echo -e "${C_CYAN}=== 配置 ClewdR 变量 ===${C_RESET}"
-    echo -e "${C_YELLOW}其中 管理面板密码 与 API 密码 为必填；IP / 端口 / 代理 可回车保持默认或留空。${C_RESET}"
     mkdir -p "${CLEWDR_DIR}"
+    show_clewdr_current_vars
+    echo -e "${C_YELLOW}管理面板密码 与 API 密码 为必填；IP / 端口 / 代理 可回车保持当前值。${C_RESET}"
 
     # 监听地址
-    echo -e "监听地址: [1] 仅本机 127.0.0.1 (默认)  [2] 局域网 0.0.0.0 (同网络其它设备可访问)"
-    read -p "请选择 (默认 1): " ip_choice
-    case "${ip_choice:-1}" in
+    local cur_ip; cur_ip=$(get_toml_value "ip"); cur_ip=${cur_ip:-127.0.0.1}
+    echo -e "监听地址 (当前: ${cur_ip}): [1] 仅本机 127.0.0.1  [2] 局域网 0.0.0.0  [回车] 保持当前"
+    read -p "请选择: " ip_choice
+    case "${ip_choice}" in
+        1) set_toml_kv "ip" "\"127.0.0.1\"";;
         2) set_toml_kv "ip" "\"0.0.0.0\"";;
-        *) set_toml_kv "ip" "\"127.0.0.1\"";;
+        *) set_toml_kv "ip" "\"${cur_ip}\"";;
     esac
 
     # 端口
     local cur_port; cur_port=$(get_toml_value "port"); cur_port=${cur_port:-8484}
     while true; do
-        read -p "监听端口 (默认 ${cur_port}): " port
+        read -p "监听端口 (当前: ${cur_port}, 回车保持): " port
         port=${port:-$cur_port}
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then set_toml_kv "port" "$port"; break; else echo -e "${C_RED}端口无效。${C_RESET}"; fi
     done
@@ -250,7 +276,7 @@ configure_clewdr() {
     local cur_admin; cur_admin=$(get_toml_value "admin_password")
     local admin_pw=""
     while [ -z "$admin_pw" ]; do
-        read -p "管理面板密码 admin_password (必填${cur_admin:+, 回车沿用当前}): " admin_pw
+        read -p "管理面板密码 admin_password (必填${cur_admin:+, 当前: ${cur_admin}, 回车沿用}): " admin_pw
         [ -z "$admin_pw" ] && [ -n "$cur_admin" ] && admin_pw="$cur_admin"
         [ -z "$admin_pw" ] && echo -e "${C_RED}不能为空。${C_RESET}"
     done
@@ -260,18 +286,58 @@ configure_clewdr() {
     local cur_api; cur_api=$(get_toml_value "password")
     local api_pw=""
     while [ -z "$api_pw" ]; do
-        read -p "API 访问密码 password (客户端连接用, 必填${cur_api:+, 回车沿用当前}): " api_pw
+        read -p "API 访问密码 password (必填${cur_api:+, 当前: ${cur_api}, 回车沿用}): " api_pw
         [ -z "$api_pw" ] && [ -n "$cur_api" ] && api_pw="$cur_api"
         [ -z "$api_pw" ] && echo -e "${C_RED}不能为空。${C_RESET}"
     done
     set_toml_kv "password" "\"${api_pw}\""
 
     # 出站代理（可选）
-    read -p "出站代理 proxy (如 http://127.0.0.1:7890, 可选, 回车跳过): " proxy
-    [ -n "$proxy" ] && set_toml_kv "proxy" "\"${proxy}\""
+    local cur_proxy; cur_proxy=$(get_toml_value "proxy")
+    read -p "出站代理 proxy (可选${cur_proxy:+, 当前: ${cur_proxy}}, 回车保持, 输入 - 清除): " proxy
+    if [ "$proxy" = "-" ]; then
+        set_toml_kv "proxy" "\"\""
+    elif [ -n "$proxy" ]; then
+        set_toml_kv "proxy" "\"${proxy}\""
+    fi
 
     echo -e "${C_GREEN}配置已写入 ${CLEWDR_CONFIG}${C_RESET}"
     read -p "按回车返回..."
+}
+
+configure_clewdr_autostart() {
+    local cur; cur=$(get_clewdr_autostart)
+    echo -e "${C_CYAN}=== 设置 ClewdR 自启动 ===${C_RESET}"
+    echo -e "开启后，启动 SillyTavern 时会自动在后台先启动 ClewdR。"
+    printf "${C_YELLOW}%-14s${C_GREEN}%s\n" "当前状态:" "$([ "$cur" = "true" ] && echo 已开启 || echo 已关闭)"
+    echo -e "  1. 开启自启动\n  2. 关闭自启动"
+    read -p "请输入选项 (默认: 0 返回): " c; c=${c:-0}
+    case "$c" in
+        1) mkdir -p "${SCRIPT_INSTALL_DIR}"; echo 'CLEWDR_AUTOSTART="true"'  > "${CLEWDR_MANAGER_CONF}"; echo -e "${C_GREEN}已开启自启动。${C_RESET}"; sleep 1;;
+        2) mkdir -p "${SCRIPT_INSTALL_DIR}"; echo 'CLEWDR_AUTOSTART="false"' > "${CLEWDR_MANAGER_CONF}"; echo -e "${C_GREEN}已关闭自启动。${C_RESET}"; sleep 1;;
+        0) return;;
+        *) echo -e "${C_RED}无效选项。${C_RESET}"; sleep 1;;
+    esac
+}
+
+configure_clewdr() {
+    while true; do
+        clear
+        local as; as=$(get_clewdr_autostart)
+        echo -e "${C_CYAN}=== 配置 ClewdR ===${C_RESET}"
+        printf "${C_YELLOW}%-14s${C_GREEN}%s\n" "自启动:" "$([ "$as" = "true" ] && echo 已开启 || echo 已关闭)"
+        echo -e "${C_BLUE}--------------------------------${C_RESET}"
+        echo -e "  1. 设置 ClewdR 自启动"
+        echo -e "  2. 配置变量"
+        echo -e "  0. 返回主菜单"
+        read -p "请输入选项 (默认: 0): " choice; choice=${choice:-0}
+        case "$choice" in
+            1) configure_clewdr_autostart;;
+            2) configure_clewdr_vars;;
+            0) break;;
+            *) echo -e "${C_RED}无效选项。${C_RESET}"; sleep 1;;
+        esac
+    done
 }
 
 # 确保管理面板密码与 API 密码已设置（二者必填），未设置则现场要求填写
@@ -401,7 +467,7 @@ main_menu() {
         echo -e "${C_CYAN}--- ClewdR 代理 ---${C_RESET}"
         if clewdr_is_installed; then echo "  5. 更新 ClewdR"; else echo "  5. 安装 ClewdR"; fi
         echo "  6. 启动 ClewdR"
-        echo "  7. 配置 ClewdR 变量"
+        echo "  7. 配置 ClewdR"
         echo ""
         echo -e "${C_CYAN}--- 管理器 ---${C_RESET}"
         echo "  4. 更新管理器脚本"
