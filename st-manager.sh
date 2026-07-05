@@ -19,6 +19,8 @@ CLEWDR_DIR="${HOME}/clewdr"
 CLEWDR_BIN="${CLEWDR_DIR}/clewdr"
 CLEWDR_CONFIG="${CLEWDR_DIR}/clewdr.toml"
 CLEWDR_MANAGER_CONF="${SCRIPT_INSTALL_DIR}/clewdr.conf"
+CLEWDR_PID_FILE="${CLEWDR_DIR}/clewdr.pid"
+CLEWDR_LOG_FILE="${CLEWDR_DIR}/clewdr.log"
 
 SCRIPT_URL="https://raw.githubusercontent.com/AmeliaStonee/SillyTavern-install/main/st-manager.sh"
 
@@ -111,7 +113,7 @@ fetch_remote_versions() {
 install_sillytavern() {
     echo -e "${C_CYAN}=== 开始安装 SillyTavern ===${C_RESET}"
     pkg update -y && pkg upgrade -y
-    pkg install git nodejs esbuild cronie zip unzip curl wget -y
+    pkg install git nodejs esbuild cronie zip unzip curl wget procps -y
     read -p "您想安装哪个分支？[1] release (稳定版, 默认) [2] staging (开发版): " choice
     choice=${choice:-1}
     if [[ "$choice" == "1" ]]; then git clone https://github.com/SillyTavern/SillyTavern "${ST_DIR}"; else git clone -b staging https://github.com/SillyTavern/SillyTavern "${ST_DIR}"; fi
@@ -362,23 +364,36 @@ print_clewdr_webui() {
     echo -e "${C_GREEN}================================================${C_RESET}"
 }
 
-# 后台启动 ClewdR（供“启动 SillyTavern 前先启动 ClewdR”使用，不阻塞终端）
+# 判断 ClewdR 后台进程是否存活（不依赖 pgrep，用 PID 文件 + kill -0）
+clewdr_running() {
+    [ -f "${CLEWDR_PID_FILE}" ] || return 1
+    local pid; pid=$(cat "${CLEWDR_PID_FILE}" 2>/dev/null)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# 后台启动 ClewdR（供自启动使用，不阻塞终端）
 start_clewdr_background() {
     clewdr_is_installed || { echo -e "${C_RED}尚未安装 ClewdR。${C_RESET}"; return 1; }
     ensure_clewdr_credentials
-    if pgrep -x clewdr >/dev/null 2>&1; then
-        echo -e "${C_GREEN}ClewdR 已在后台运行。${C_RESET}"
-    else
-        cd "${CLEWDR_DIR}" || { echo -e "${C_RED}无法进入目录 ${CLEWDR_DIR}${C_RESET}"; return 1; }
-        LD_LIBRARY_PATH="${CLEWDR_DIR}:${LD_LIBRARY_PATH}" nohup ./clewdr > "${CLEWDR_DIR}/clewdr.log" 2>&1 &
-        sleep 1
-        if pgrep -x clewdr >/dev/null 2>&1; then
-            echo -e "${C_GREEN}ClewdR 已在后台启动（日志: ${CLEWDR_DIR}/clewdr.log）。${C_RESET}"
-        else
-            echo -e "${C_RED}ClewdR 后台启动失败，请查看日志: ${CLEWDR_DIR}/clewdr.log${C_RESET}"; return 1
-        fi
+    if clewdr_running; then
+        echo -e "${C_GREEN}ClewdR 已在后台运行 (PID $(cat "${CLEWDR_PID_FILE}"))。${C_RESET}"
+        print_clewdr_webui; return 0
     fi
-    print_clewdr_webui
+    cd "${CLEWDR_DIR}" || { echo -e "${C_RED}无法进入目录 ${CLEWDR_DIR}${C_RESET}"; return 1; }
+    # Android 版依赖同目录下的 libc++_shared.so，需通过 LD_LIBRARY_PATH 让动态链接器找到它
+    LD_LIBRARY_PATH="${CLEWDR_DIR}:${LD_LIBRARY_PATH}" nohup ./clewdr > "${CLEWDR_LOG_FILE}" 2>&1 &
+    local pid=$!
+    echo "$pid" > "${CLEWDR_PID_FILE}"
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+        echo -e "${C_GREEN}ClewdR 已在后台启动 (PID ${pid}，日志: ${CLEWDR_LOG_FILE})。${C_RESET}"
+        print_clewdr_webui
+    else
+        rm -f "${CLEWDR_PID_FILE}"
+        echo -e "${C_RED}ClewdR 后台启动失败，日志末尾如下：${C_RESET}"
+        tail -n 15 "${CLEWDR_LOG_FILE}" 2>/dev/null
+        return 1
+    fi
 }
 
 start_clewdr() {
@@ -451,7 +466,7 @@ main_menu() {
         echo -e "${C_CYAN}      SillyTavern 管理器  v${MANAGER_VERSION}      ${C_RESET}"
         echo -e "${C_BLUE}=======================================${C_RESET}"
         local clewdr_status="未安装"
-        if clewdr_is_installed; then clewdr_status="已安装"; fi
+        if clewdr_is_installed; then clewdr_status="已安装"; clewdr_running && clewdr_status="已安装 (后台运行中)"; fi
         printf "${C_YELLOW}%-18s ${C_GREEN}%s\n" "本地版本:" "$local_version_info"
         printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "远程 Release:" "$RELEASE_VER"
         printf "${C_YELLOW}%-18s ${C_CYAN}%s\n" "远程 Staging:" "$STAGING_VER"
